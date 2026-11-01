@@ -544,7 +544,7 @@ INSERT INTO dm_prof.dim_data (data_completa, semestre, ano, sem)
 SELECT data_completa, semestre, ano, semestre FROM dm_aluno_prof.dim_data ORDER BY data_completa;
 
 -- 2.6 Fato_Rend_Disciplina: uma linha consolidada por turma
---     (turma_disciplina_id agora e o id da turma; antes recebia o id da disciplina)
+--     (turma_disciplina_id recebe o id da disciplina, conforme a FK do DDL)
 INSERT INTO dm_prof.fato_rend_disciplina (
     tempo_id, turma_id, turma_disciplina_id, curso_id,
     qtd_aprn, qtd_rprn, qtd_rprf, total_reprovados,

@@ -6,7 +6,7 @@ CREATE SCHEMA IF NOT EXISTS dm_aluno_prof;
 -- ============================================================================
 -- 1. DIMENSÃO: DIM_Curso (dm_aluno_prof)
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS dim_curso (
+CREATE TABLE IF NOT EXISTS dm_aluno_prof.dim_curso (
     curso_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     nome VARCHAR(100) NOT NULL,
     departamento VARCHAR(200),
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS dim_curso (
 -- ============================================================================
 -- 2. DIMENSÃO: DIM_Professor (dm_aluno_prof)
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS dim_professor (
+CREATE TABLE IF NOT EXISTS dm_aluno_prof.dim_professor (
     professor_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     numero_matricula VARCHAR(50) NOT NULL UNIQUE,
     nome VARCHAR(150) NOT NULL,
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS dim_professor (
 -- ============================================================================
 -- 3. DIMENSÃO: DIM_Data (dm_aluno_prof)
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS dim_data (
+CREATE TABLE IF NOT EXISTS dm_aluno_prof.dim_data (
     tempo_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     data_completa DATE NOT NULL UNIQUE,
     semestre INTEGER NOT NULL,
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS dim_data (
 -- ============================================================================
 -- 4. DIMENSÃO: DIM_Disciplina (dm_aluno_prof)
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS dim_disciplina (
+CREATE TABLE IF NOT EXISTS dm_aluno_prof.dim_disciplina (
     disciplina_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo_disciplina VARCHAR(20) NOT NULL UNIQUE,
     nome VARCHAR(100) NOT NULL,
@@ -68,13 +68,13 @@ CREATE TABLE IF NOT EXISTS dim_disciplina (
     tipo VARCHAR(50),
     horario VARCHAR(100),
     CONSTRAINT fk_disciplina_curso 
-        FOREIGN KEY (fk_curso) REFERENCES dim_curso (curso_id)
+        FOREIGN KEY (fk_curso) REFERENCES dm_aluno_prof.dim_curso (curso_id)
 );
 
 -- ============================================================================
 -- 5. DIMENSÃO: DIM_TurmaDisciplina (dm_aluno_prof)
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS dim_turma_disciplina (
+CREATE TABLE IF NOT EXISTS dm_aluno_prof.dim_turma_disciplina (
     turma_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo_turma VARCHAR(50) NOT NULL,
     fk_disciplina INTEGER NOT NULL,
@@ -82,19 +82,19 @@ CREATE TABLE IF NOT EXISTS dim_turma_disciplina (
     sk_p2 INTEGER,
     sk_p3 INTEGER,
     CONSTRAINT fk_turma_disciplina 
-        FOREIGN KEY (fk_disciplina) REFERENCES dim_disciplina (disciplina_id),
+        FOREIGN KEY (fk_disciplina) REFERENCES dm_aluno_prof.dim_disciplina (disciplina_id),
     CONSTRAINT fk_turma_prof1 
-        FOREIGN KEY (sk_p1) REFERENCES dim_professor (professor_id),
+        FOREIGN KEY (sk_p1) REFERENCES dm_aluno_prof.dim_professor (professor_id),
     CONSTRAINT fk_turma_prof2 
-        FOREIGN KEY (sk_p2) REFERENCES dim_professor (professor_id),
+        FOREIGN KEY (sk_p2) REFERENCES dm_aluno_prof.dim_professor (professor_id),
     CONSTRAINT fk_turma_prof3 
-        FOREIGN KEY (sk_p3) REFERENCES dim_professor (professor_id)
+        FOREIGN KEY (sk_p3) REFERENCES dm_aluno_prof.dim_professor (professor_id)
 );
 
 -- ============================================================================
 -- 6. DIMENSÃO: DIM_Aluno (dm_aluno_prof)
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS dim_aluno (
+CREATE TABLE IF NOT EXISTS dm_aluno_prof.dim_aluno (
     aluno_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     numero_matricula VARCHAR(50) NOT NULL UNIQUE,
     nome VARCHAR(150) NOT NULL,
@@ -130,13 +130,13 @@ CREATE TABLE IF NOT EXISTS dim_aluno (
     assistencia_estudantil VARCHAR(50),
     flg_blocado BOOLEAN DEFAULT FALSE,
     CONSTRAINT fk_aluno_curso 
-        FOREIGN KEY (curso_id) REFERENCES dim_curso (curso_id)
+        FOREIGN KEY (curso_id) REFERENCES dm_aluno_prof.dim_curso (curso_id)
 );
 
 -- ============================================================================
 -- 7. TABELA FATO: Fato_Aluno_em_Disciplina (dm_aluno_prof)
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS fato_aluno_em_disciplina (
+CREATE TABLE IF NOT EXISTS dm_aluno_prof.fato_aluno_em_disciplina (
     tempo_id INTEGER NOT NULL,
     turma_id INTEGER NOT NULL,
     aluno_id INTEGER NOT NULL,
@@ -151,15 +151,15 @@ CREATE TABLE IF NOT EXISTS fato_aluno_em_disciplina (
     CONSTRAINT pk_fato_aluno_disciplina 
         PRIMARY KEY (tempo_id, turma_id, aluno_id, disciplina_id, curso_id),
     CONSTRAINT fk_fato_tempo 
-        FOREIGN KEY (tempo_id) REFERENCES dim_data (tempo_id),
+        FOREIGN KEY (tempo_id) REFERENCES dm_aluno_prof.dim_data (tempo_id),
     CONSTRAINT fk_fato_turma 
-        FOREIGN KEY (turma_id) REFERENCES dim_turma_disciplina (turma_id),
+        FOREIGN KEY (turma_id) REFERENCES dm_aluno_prof.dim_turma_disciplina (turma_id),
     CONSTRAINT fk_fato_aluno 
-        FOREIGN KEY (aluno_id) REFERENCES dim_aluno (aluno_id),
+        FOREIGN KEY (aluno_id) REFERENCES dm_aluno_prof.dim_aluno (aluno_id),
     CONSTRAINT fk_fato_disciplina 
-        FOREIGN KEY (disciplina_id) REFERENCES dim_disciplina (disciplina_id),
+        FOREIGN KEY (disciplina_id) REFERENCES dm_aluno_prof.dim_disciplina (disciplina_id),
     CONSTRAINT fk_fato_curso 
-        FOREIGN KEY (curso_id) REFERENCES dim_curso (curso_id)
+        FOREIGN KEY (curso_id) REFERENCES dm_aluno_prof.dim_curso (curso_id)
 );
 
 -- ============================================================================

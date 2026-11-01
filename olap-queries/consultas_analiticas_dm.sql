@@ -2,7 +2,7 @@
 -- CONSULTAS ANALITICAS (PDF "DW Alunos e Profs - Consultas Analiticas")
 -- Schemas: dm_aluno_prof [F1] e dm_prof [F2]
 --
--- Pre-requisito: povoamento_dm_ufpe_corrigido.txt e metadados_extensao_dm.txt
+-- Pre-requisito: populate_tables.sql e metadados_extensao_dm.sql
 -- ja executados. Cada consulta e independente; rode uma de cada vez.
 --
 -- NOTAS DE LEITURA
@@ -645,22 +645,6 @@ GROUP BY a.tipo_cota <> 'Ampla Concorrência'
 ORDER BY bloco, grupo;
 
 -- 4.3 Diversidade por curso/centro; cursos de maior prestigio (Medicina) x demais [Aluno]
---     indice_diversidade_raca = 1 - soma(p^2) (Simpson): 0 = homogeneo, ~0,8 = muito diverso
-WITH base AS (
-    SELECT c.centro, c.nome AS curso, a.raca_etnia, COUNT(*) AS n
-    FROM dm_aluno_prof.dim_aluno a
-    JOIN dm_aluno_prof.dim_curso c ON c.curso_id = a.curso_id
-    GROUP BY c.centro, c.nome, a.raca_etnia
-), div AS (
-    SELECT centro, curso, SUM(n) AS alunos,
-           ROUND(1 - SUM((n::numeric / SUM(n) OVER (PARTITION BY curso)) ^ 2), 3) AS indice_diversidade_raca
-    FROM base GROUP BY centro, curso, n
-)
-SELECT d.centro, d.curso, MAX(d.alunos) AS alunos,
-       ROUND(SUM(d.indice_diversidade_raca) / 1, 3) AS soma_parcial_ignorar
-FROM div d GROUP BY d.centro, d.curso
-LIMIT 0;  -- (consulta auxiliar abaixo substitui esta)
-
 SELECT c.centro, c.nome AS curso,
        (c.nome = 'Medicina') AS curso_prestigio,
        COUNT(*) AS alunos,

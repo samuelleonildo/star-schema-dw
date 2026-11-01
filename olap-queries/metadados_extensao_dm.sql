@@ -4,9 +4,9 @@
 --
 -- ORDEM DE EXECUCAO:
 --   1) criacao dos schemas (seus dois DDLs)
---   2) povoamento_dm_ufpe_corrigido.txt
+--   2) populate_tables.sql
 --   3) ESTE SCRIPT (uma unica vez, numa unica sessao)
---   4) consultas_analiticas_dm.txt
+--   4) consultas_analiticas_dm.sql
 -- Para refazer: rode de novo o passo 2 (ele limpa tambem as tabelas novas
 -- via CASCADE) e depois este script.
 --
