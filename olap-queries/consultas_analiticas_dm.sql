@@ -589,22 +589,6 @@ FROM por_sem
 GROUP BY curso
 ORDER BY media_creditos_adquiridos_sem;
 
--- 3.6 Descompasso entre periodo sugerido e periodo em que o aluno cursa [F1]
---     (inclui o curriculo, util para comparar efeito de mudanca curricular)
-SELECT curso, curriculo,
-       (sem_abs - ingresso_abs + 1) - periodo_sugerido AS descompasso,   -- >0 = cursando atrasado
-       COUNT(*) AS matriculas,
-       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY curso), 2) AS pct_do_curso
-FROM dm_aluno_prof.vw_aluno_disciplina
-GROUP BY curso, curriculo, 3
-ORDER BY curso, descompasso;
-
-SELECT (sem_abs - ingresso_abs + 1) - periodo_sugerido AS descompasso,
-       COUNT(*) AS matriculas,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE situacao = 'Aprovado') / COUNT(*), 2) AS pct_aprovacao
-FROM dm_aluno_prof.vw_aluno_disciplina
-GROUP BY 1 ORDER BY 1;
-
 
 -- ############################################################################
 -- 4. EQUIDADE E PERFIL DISCENTE
@@ -644,82 +628,29 @@ FROM dm_aluno_prof.dim_aluno a
 GROUP BY a.tipo_cota <> 'Ampla Concorrência'
 ORDER BY bloco, grupo;
 
--- 4.3 Diversidade por curso/centro; cursos de maior prestigio (Medicina) x demais [Aluno]
---     indice_diversidade_raca = 1 - soma(p^2) (Simpson): 0 = homogeneo, ~0,8 = muito diverso
-WITH base AS (
-    SELECT c.centro, c.nome AS curso, a.raca_etnia, COUNT(*) AS n
-    FROM dm_aluno_prof.dim_aluno a
-    JOIN dm_aluno_prof.dim_curso c ON c.curso_id = a.curso_id
-    GROUP BY c.centro, c.nome, a.raca_etnia
-), div AS (
-    SELECT centro, curso, SUM(n) AS alunos,
-           ROUND(1 - SUM((n::numeric / SUM(n) OVER (PARTITION BY curso)) ^ 2), 3) AS indice_diversidade_raca
-    FROM base GROUP BY centro, curso, n
+-- 4.5 Perfil geográfico
+WITH auxilios AS ( 
+    SELECT aluno_id, tipo_auxilio, MIN(data_inicio) AS primeiro_auxilio
+    FROM dm_aluno_prof.aluno_auxilio
+    GROUP BY aluno_id, tipo_auxilio),
+base AS ( 
+    SELECT x.tipo_auxilio,
+        CASE
+            WHEN v.data_completa < x.primeiro_auxilio
+                THEN 'Antes do auxílio'
+            ELSE 'A partir do auxílio'
+        END AS periodo, v.aluno_id, v.media_nota, v.situacao
+    FROM dm_aluno_prof.vw_aluno_disciplina v
+    JOIN auxilios x ON x.aluno_id = v.aluno_id
 )
-SELECT d.centro, d.curso, MAX(d.alunos) AS alunos,
-       ROUND(SUM(d.indice_diversidade_raca) / 1, 3) AS soma_parcial_ignorar
-FROM div d GROUP BY d.centro, d.curso
-LIMIT 0;  -- (consulta auxiliar abaixo substitui esta)
-
-SELECT c.centro, c.nome AS curso,
-       (c.nome = 'Medicina') AS curso_prestigio,
-       COUNT(*) AS alunos,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE a.raca_etnia IN ('Parda', 'Preta', 'Indígena')) / COUNT(*), 1) AS pct_ppi,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE a.tipo_cota <> 'Ampla Concorrência') / COUNT(*), 1)              AS pct_cotistas,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE a.tipo_escola_em = 'Pública') / COUNT(*), 1)                     AS pct_escola_publica,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE a.faixa_economica = 'Até 1,5 SM') / COUNT(*), 1)                 AS pct_baixa_renda,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE a.genero = 'Feminino') / COUNT(*), 1)                            AS pct_feminino
-FROM dm_aluno_prof.dim_aluno a
-JOIN dm_aluno_prof.dim_curso c ON c.curso_id = a.curso_id
-GROUP BY c.centro, c.nome
-ORDER BY c.centro, c.nome;
-
--- 4.5 Impacto da assistencia estudantil: rendimento antes x depois do inicio do auxilio [F1 + aluno_auxilio]
-SELECT x.tipo_auxilio,
-       CASE WHEN v.data_completa < x.data_inicio THEN '1-Antes do auxílio' ELSE '2-Com auxílio' END AS periodo,
-       COUNT(*) AS matriculas,
-       COUNT(DISTINCT v.aluno_id) AS alunos,
-       ROUND(AVG(v.media_nota), 2) AS media_nota,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE v.situacao <> 'Aprovado') / COUNT(*), 2) AS pct_reprovacao
-FROM dm_aluno_prof.vw_aluno_disciplina v
-JOIN dm_aluno_prof.aluno_auxilio x ON x.aluno_id = v.aluno_id
-GROUP BY x.tipo_auxilio, 2
-ORDER BY x.tipo_auxilio, periodo;
-
--- 4.5b Evasao por aluno-semestre: semestres COM auxilio x SEM auxilio (mesma populacao de baixa renda) [matricula + auxilio]
-SELECT CASE WHEN x.aluno_id IS NOT NULL THEN 'Com auxílio no semestre' ELSE 'Sem auxílio no semestre' END AS situacao_auxilio,
-       a.faixa_economica,
-       COUNT(*) AS aluno_semestres,
-       COUNT(*) FILTER (WHERE m.situacao = 'Cancelado') AS cancelamentos,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE m.situacao = 'Cancelado') / COUNT(*), 2) AS pct_cancelamento_por_semestre
-FROM dm_aluno_prof.fato_matricula_periodo m
-JOIN dm_aluno_prof.dim_data d ON d.tempo_id = m.tempo_id
-JOIN dm_aluno_prof.dim_aluno a ON a.aluno_id = m.aluno_id
-LEFT JOIN dm_aluno_prof.aluno_auxilio x
-       ON x.aluno_id = m.aluno_id
-      AND d.data_completa BETWEEN x.data_inicio AND COALESCE(x.data_fim, DATE '9999-12-31')
-GROUP BY 1, a.faixa_economica
-ORDER BY a.faixa_economica, 1;
-
--- 4.6 Perfil geografico: naturalidade e bairro x evasao e rendimento [Aluno + F1]
---     (o DDL guarda so a cidade em naturalidade; nao ha coluna de Estado)
-SELECT a.naturalidade,
-       COUNT(DISTINCT a.aluno_id) AS alunos,
-       ROUND(100.0 * COUNT(DISTINCT a.aluno_id) FILTER (WHERE a.tipo_evasao <> 'Ativo') / COUNT(DISTINCT a.aluno_id), 2) AS taxa_evasao,
-       ROUND(AVG(f.media_nota), 2) AS media_nota
-FROM dm_aluno_prof.dim_aluno a
-JOIN dm_aluno_prof.fato_aluno_em_disciplina f ON f.aluno_id = a.aluno_id
-GROUP BY a.naturalidade
-ORDER BY taxa_evasao DESC;
-
-SELECT a.bairro_residencia,
-       COUNT(DISTINCT a.aluno_id) AS alunos,
-       ROUND(100.0 * COUNT(DISTINCT a.aluno_id) FILTER (WHERE a.tipo_evasao <> 'Ativo') / COUNT(DISTINCT a.aluno_id), 2) AS taxa_evasao,
-       ROUND(AVG(f.media_nota), 2) AS media_nota
-FROM dm_aluno_prof.dim_aluno a
-JOIN dm_aluno_prof.fato_aluno_em_disciplina f ON f.aluno_id = a.aluno_id
-GROUP BY a.bairro_residencia
-ORDER BY taxa_evasao DESC;
+SELECT tipo_auxilio, periodo,
+    COUNT(*) AS matriculas,
+    COUNT(DISTINCT aluno_id) AS alunos,
+    ROUND( AVG(media_nota), 2 ) AS media_nota,
+    ROUND( 100.0 * COUNT(*) FILTER (WHERE situacao IN ( 'Reprovado por Nota', 'Reprovado por Falta')) / NULLIF(COUNT(*), 0), 2 ) AS pct_reprovacao
+FROM base
+GROUP BY tipo_auxilio, periodo
+ORDER BY tipo_auxilio, periodo;
 
 
 -- ############################################################################
@@ -737,58 +668,28 @@ JOIN dm_prof.dim_professor p ON p.professor_id = s.pid;
 
 -- 5.1 Rendimento medio por professor (aprovacao, nota, faltas) - ponderado pelos matriculados
 SELECT professor_id, professor, regime_trabalho, titulacao,
-       COUNT(*) AS turmas,
-       SUM(qtd_matriculados) AS alunos,
-       ROUND(100.0 * SUM(qtd_aprn) / SUM(qtd_matriculados), 2)                    AS pct_aprovacao,
-       ROUND(SUM(media_notas * qtd_matriculados) / SUM(qtd_matriculados), 2)      AS media_nota,
-       ROUND(SUM(media_faltas * qtd_matriculados) / SUM(qtd_matriculados), 2)     AS media_faltas
+    COUNT(DISTINCT turma_id) AS turmas,
+    SUM(qtd_matriculados) AS matriculas_atribuidas,
+    ROUND( 100.0 * SUM(qtd_aprn)/ NULLIF(SUM(qtd_matriculados), 0),2) AS pct_aprovacao,
+    ROUND(SUM(media_notas * qtd_matriculados)/ NULLIF(SUM(qtd_matriculados), 0),2) AS media_nota,
+    ROUND(SUM(media_faltas * qtd_matriculados)/ NULLIF(SUM(qtd_matriculados), 0),2) AS media_faltas
 FROM dm_prof.vw_rend_prof_turma
 GROUP BY professor_id, professor, regime_trabalho, titulacao
 ORDER BY pct_aprovacao;
 
+
 -- 5.2 Professores com maior variacao de aprovacao entre turmas da mesma disciplina
-SELECT professor_id, professor, codigo_disciplina, disciplina,
-       COUNT(*) AS turmas,
-       ROUND(MIN(prct_aprovados), 1) AS menor_aprovacao,
-       ROUND(MAX(prct_aprovados), 1) AS maior_aprovacao,
-       ROUND(STDDEV_POP(prct_aprovados), 2) AS desvio_aprovacao
+SELECT professor_id, professor, codigo_disciplina,disciplina,
+    COUNT(DISTINCT turma_id) AS turmas,
+    ROUND(MIN(prct_aprovados),2) AS menor_aprovacao,
+    ROUND(MAX(prct_aprovados),2) AS maior_aprovacao,
+    ROUND(AVG(prct_aprovados),2) AS media_aprovacao,
+    ROUND(STDDEV_POP(prct_aprovados),2) AS desvio_aprovacao
 FROM dm_prof.vw_rend_prof_turma
 GROUP BY professor_id, professor, codigo_disciplina, disciplina
-HAVING COUNT(*) >= 2
+HAVING COUNT(DISTINCT turma_id) >= 2
 ORDER BY desvio_aprovacao DESC
 LIMIT 50;
-
--- 5.3 Perfil docente por departamento (departamento = onde o professor mais leciona)
-WITH prof_depto AS (
-    SELECT DISTINCT ON (professor_id) professor_id, departamento
-    FROM dm_prof.vw_rend_prof_turma
-    GROUP BY professor_id, departamento
-    ORDER BY professor_id, COUNT(*) DESC
-)
-SELECT pd.departamento, p.genero, p.faixa_etaria, p.raca_etnia, COUNT(*) AS professores,
-       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY pd.departamento), 1) AS pct_no_departamento
-FROM dm_prof.dim_professor p
-JOIN prof_depto pd ON pd.professor_id = p.professor_id
-GROUP BY pd.departamento, p.genero, p.faixa_etaria, p.raca_etnia
-ORDER BY pd.departamento, professores DESC;
-
--- 5.4 Carga docente por semestre: turmas, alunos e disciplinas, com regime de trabalho
-SELECT ano_semestre, professor_id, professor, regime_trabalho, titulacao,
-       COUNT(DISTINCT turma_id)      AS turmas,
-       SUM(qtd_matriculados)         AS alunos,
-       COUNT(DISTINCT disciplina_id) AS disciplinas
-FROM dm_prof.vw_rend_prof_turma
-GROUP BY ano_semestre, professor_id, professor, regime_trabalho, titulacao
-ORDER BY ano_semestre, turmas DESC, alunos DESC;
-
--- 5.4b Carga media por regime de trabalho
-SELECT regime_trabalho,
-       COUNT(DISTINCT professor_id) AS professores,
-       ROUND(COUNT(DISTINCT (professor_id, turma_id))::numeric / COUNT(DISTINCT (professor_id, ano_semestre)), 2) AS turmas_por_prof_semestre,
-       ROUND(SUM(qtd_matriculados)::numeric / COUNT(DISTINCT (professor_id, ano_semestre)), 1) AS alunos_por_prof_semestre
-FROM dm_prof.vw_rend_prof_turma
-GROUP BY regime_trabalho
-ORDER BY regime_trabalho;
 
 -- 5.5 Turmas com baixa matricula (menos de 15 alunos ou menos de 60% das vagas)
 SELECT ano_semestre, curso, codigo_disciplina, disciplina, codigo_turma,
@@ -797,19 +698,6 @@ SELECT ano_semestre, curso, codigo_disciplina, disciplina, codigo_turma,
 FROM dm_prof.vw_rend_turma
 WHERE qtd_matriculados < 15 OR qtd_matriculados < 0.6 * vagas_ofertadas
 ORDER BY pct_ocupacao;
-
--- 5.6 Superlotacao x rendimento (matriculados acima das vagas ofertadas)
-SELECT CASE WHEN qtd_matriculados > vagas_ofertadas THEN 'Superlotada'
-            WHEN qtd_matriculados >= 0.8 * vagas_ofertadas THEN 'Ocupação adequada'
-            ELSE 'Ociosa' END AS situacao_turma,
-       COUNT(*) AS turmas,
-       ROUND(AVG(100.0 * qtd_matriculados / vagas_ofertadas), 1) AS ocupacao_media_pct,
-       ROUND(AVG(prct_aprovados), 2) AS aprovacao_media,
-       ROUND(AVG(media_notas), 2)    AS nota_media,
-       ROUND(AVG(media_faltas), 2)   AS faltas_media
-FROM dm_prof.vw_rend_turma
-GROUP BY 1
-ORDER BY 1;
 
 -- 5.7 Professores com alto % de reprovacao por falta (acima da media geral + 1 desvio)
 WITH prof AS (
