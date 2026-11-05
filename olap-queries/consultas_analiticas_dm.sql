@@ -73,6 +73,8 @@ JOIN dm_aluno_prof.dim_data dt ON dt.tempo_id = m.tempo_id;
 -- ############################################################################
 
 -- 1.1 Taxa de reprovacao por disciplina por semestre (nota x falta) [F2]
+--     Cada disciplina tem 1 turma por semestre, entao cada linha e uma turma (~2.400 linhas).
+--     Ordena pela reprovacao: o Metabase exibe ate 2.000 linhas e o corte deve cair nas menos criticas.
 SELECT codigo_disciplina, disciplina, curso, ano_semestre,
        SUM(qtd_matriculados) AS matriculados,
        ROUND(100.0 * SUM(qtd_rprn) / SUM(qtd_matriculados), 2) AS pct_reprov_nota,
@@ -80,65 +82,50 @@ SELECT codigo_disciplina, disciplina, curso, ano_semestre,
        ROUND(100.0 * SUM(total_reprovados) / SUM(qtd_matriculados), 2) AS pct_reprov_total
 FROM dm_prof.vw_rend_turma
 GROUP BY codigo_disciplina, disciplina, curso, ano_semestre
-ORDER BY ano_semestre, pct_reprov_total DESC;
+ORDER BY pct_reprov_total DESC, ano_semestre;
 
--- 1.2a Top 10 disciplinas "gargalo" POR CURSO [F2]
+-- 1.2 Top 10 disciplinas "gargalo" por CURSO, DEPARTAMENTO e CENTRO [F2]
+--     Uma consulta so (antes 1.2a/1.2b/1.2c). Filtre pela coluna nivel.
+--     Agrupa pelo nome da disciplina: no departamento/centro, o mesmo nome em cursos
+--     diferentes (ex.: Calculo 1) vira uma linha so, e qtd_codigos mostra quantos foram somados.
+--     Desempate por volume e nome para o top 10 nao mudar entre execucoes.
 SELECT * FROM (
-    SELECT curso, codigo_disciplina, disciplina,
+    SELECT CASE WHEN GROUPING(curso) = 0 THEN 'Curso'
+                WHEN GROUPING(departamento) = 0 THEN 'Departamento'
+                ELSE 'Centro' END AS nivel,
+           COALESCE(curso, departamento, centro) AS grupo,
+           disciplina,
+           COUNT(DISTINCT codigo_disciplina) AS qtd_codigos,
            SUM(qtd_matriculados) AS matriculados,
            ROUND(100.0 * SUM(total_reprovados) / SUM(qtd_matriculados), 2) AS pct_reprovacao,
-           ROW_NUMBER() OVER (PARTITION BY curso
-                              ORDER BY SUM(total_reprovados)::numeric / SUM(qtd_matriculados) DESC) AS ranking
+           ROW_NUMBER() OVER (PARTITION BY GROUPING(curso), GROUPING(departamento), COALESCE(curso, departamento, centro)
+                              ORDER BY SUM(total_reprovados)::numeric / SUM(qtd_matriculados) DESC,
+                                       SUM(qtd_matriculados) DESC, disciplina) AS ranking
     FROM dm_prof.vw_rend_turma
-    GROUP BY curso, codigo_disciplina, disciplina
+    GROUP BY GROUPING SETS ((curso, disciplina), (departamento, disciplina), (centro, disciplina))
     HAVING SUM(qtd_matriculados) >= 30
 ) r
 WHERE ranking <= 10
-ORDER BY curso, ranking;
-
--- 1.2b Top 10 POR DEPARTAMENTO (agrupa pelo nome da disciplina) [F2]
-SELECT * FROM (
-    SELECT departamento, disciplina,
-           SUM(qtd_matriculados) AS matriculados,
-           ROUND(100.0 * SUM(total_reprovados) / SUM(qtd_matriculados), 2) AS pct_reprovacao,
-           ROW_NUMBER() OVER (PARTITION BY departamento
-                              ORDER BY SUM(total_reprovados)::numeric / SUM(qtd_matriculados) DESC) AS ranking
-    FROM dm_prof.vw_rend_turma
-    GROUP BY departamento, disciplina
-    HAVING SUM(qtd_matriculados) >= 30
-) r
-WHERE ranking <= 10
-ORDER BY departamento, ranking;
-
--- 1.2c Top 10 POR CENTRO [F2]
-SELECT * FROM (
-    SELECT centro, disciplina,
-           SUM(qtd_matriculados) AS matriculados,
-           ROUND(100.0 * SUM(total_reprovados) / SUM(qtd_matriculados), 2) AS pct_reprovacao,
-           ROW_NUMBER() OVER (PARTITION BY centro
-                              ORDER BY SUM(total_reprovados)::numeric / SUM(qtd_matriculados) DESC) AS ranking
-    FROM dm_prof.vw_rend_turma
-    GROUP BY centro, disciplina
-    HAVING SUM(qtd_matriculados) >= 30
-) r
-WHERE ranking <= 10
-ORDER BY centro, ranking;
+ORDER BY nivel, grupo, ranking;
 
 -- 1.3 Razao reprovacao por falta / reprovacao total por disciplina [F2]
 --     Razao alta (>= 0,5) sugere problema de engajamento/frequencia, nao de aprendizagem
+--     Minimo de 10 reprovados: com 2 ou 3 a razao vira 0 ou 1 e a classificacao e ruido.
 SELECT curso, codigo_disciplina, disciplina,
        SUM(total_reprovados) AS reprovados,
        SUM(qtd_rprf)         AS reprovados_falta,
-       ROUND(SUM(qtd_rprf)::numeric / NULLIF(SUM(total_reprovados), 0), 3) AS razao_falta_total,
-       CASE WHEN SUM(qtd_rprf)::numeric / NULLIF(SUM(total_reprovados), 0) >= 0.5
+       ROUND(SUM(qtd_rprf)::numeric / SUM(total_reprovados), 3) AS razao_falta_total,
+       CASE WHEN SUM(qtd_rprf)::numeric / SUM(total_reprovados) >= 0.5
             THEN 'Engajamento/frequencia' ELSE 'Aprendizagem' END AS leitura
 FROM dm_prof.vw_rend_turma
 GROUP BY curso, codigo_disciplina, disciplina
-HAVING SUM(total_reprovados) > 0
+HAVING SUM(total_reprovados) >= 10
 ORDER BY razao_falta_total DESC;
 
--- 1.4 Distribuicao de notas por faixa e classificacao da turma [F2]
---     Polarizada = menos de 40% das notas na faixa intermediaria (3 a 6,9)
+-- 1.4 Distribuicao de notas por faixa e classificacao da disciplina [F2]
+--     Polarizada = muitas notas nos DOIS extremos (>= 20% em 0-2,9 e >= 20% em 7-10).
+--     Se nao, concentrada na faixa que tiver >= 50% das notas. Se nenhuma tiver, dispersa.
+--     Minimo de 30 matriculados, como na 1.2.
 SELECT curso, codigo_disciplina, disciplina,
        SUM(qtd_notas_0_a_2_9) AS faixa_0_a_2_9,
        SUM(qtd_notas_3_a_6_9) AS faixa_3_a_6_9,
@@ -146,10 +133,14 @@ SELECT curso, codigo_disciplina, disciplina,
        ROUND(100.0 * SUM(qtd_notas_0_a_2_9) / SUM(qtd_matriculados), 1) AS pct_0_a_2_9,
        ROUND(100.0 * SUM(qtd_notas_3_a_6_9) / SUM(qtd_matriculados), 1) AS pct_3_a_6_9,
        ROUND(100.0 * SUM(qtd_notas_7_a_10)  / SUM(qtd_matriculados), 1) AS pct_7_a_10,
-       CASE WHEN 100.0 * SUM(qtd_notas_3_a_6_9) / SUM(qtd_matriculados) < 40
-            THEN 'Polarizada' ELSE 'Concentrada' END AS distribuicao
+       CASE WHEN 100.0 * SUM(qtd_notas_0_a_2_9) / SUM(qtd_matriculados) >= 20
+             AND 100.0 * SUM(qtd_notas_7_a_10)  / SUM(qtd_matriculados) >= 20 THEN 'Polarizada'
+            WHEN 100.0 * SUM(qtd_notas_7_a_10)  / SUM(qtd_matriculados) >= 50 THEN 'Concentrada em notas altas'
+            WHEN 100.0 * SUM(qtd_notas_3_a_6_9) / SUM(qtd_matriculados) >= 50 THEN 'Concentrada na faixa media'
+            ELSE 'Dispersa' END AS distribuicao
 FROM dm_prof.vw_rend_turma
 GROUP BY curso, codigo_disciplina, disciplina
+HAVING SUM(qtd_matriculados) >= 30
 ORDER BY pct_0_a_2_9 DESC;
 
 -- 1.5 Diferenca media x mediana por turma (assimetria) [F2]
@@ -162,28 +153,45 @@ WHERE qtd_matriculados >= 10
 ORDER BY distancia DESC
 LIMIT 50;
 
--- 1.6a Variancia do % de aprovacao entre turmas da mesma disciplina [F2 + Professor]
+-- 1.6a Desvio do % de aprovacao entre turmas da mesma disciplina [F2 + Professor]
+--      Cada disciplina tem 1 turma por semestre: a variacao e entre semestres (cada um com outro professor).
+--      Desvio amostral (2 a 6 turmas por disciplina). A variancia saiu por repetir a mesma informacao.
 SELECT codigo_disciplina, disciplina, curso,
        COUNT(*)                                        AS turmas,
        COUNT(DISTINCT sk_p1)                           AS professores,
        ROUND(AVG(prct_aprovados), 2)                   AS media_pct_aprovacao,
-       ROUND(VAR_POP(prct_aprovados), 2)               AS variancia_pct_aprovacao,
-       ROUND(STDDEV_POP(prct_aprovados), 2)            AS desvio_pct_aprovacao
+       ROUND(STDDEV_SAMP(prct_aprovados), 2)           AS desvio_pct_aprovacao
 FROM dm_prof.vw_rend_turma
 GROUP BY codigo_disciplina, disciplina, curso
 HAVING COUNT(*) >= 2
-ORDER BY variancia_pct_aprovacao DESC;
+ORDER BY desvio_pct_aprovacao DESC;
 
--- 1.6b Professor x media da disciplina (detalhe por professor principal) [F2 + Professor]
-SELECT r.codigo_disciplina, r.disciplina, p.nome AS professor,
-       COUNT(*) AS turmas,
-       ROUND(AVG(r.prct_aprovados), 2) AS aprovacao_prof,
-       ROUND(AVG(AVG(r.prct_aprovados)) OVER (PARTITION BY r.codigo_disciplina), 2) AS media_aprovacao_disciplina,
-       ROUND(AVG(r.prct_aprovados) - AVG(AVG(r.prct_aprovados)) OVER (PARTITION BY r.codigo_disciplina), 2) AS diferenca_vs_disciplina
-FROM dm_prof.vw_rend_turma r
-JOIN dm_prof.dim_professor p ON p.professor_id = r.sk_p1
-GROUP BY r.codigo_disciplina, r.disciplina, p.professor_id, p.nome
-ORDER BY ABS(AVG(r.prct_aprovados) - AVG(AVG(r.prct_aprovados)) OVER (PARTITION BY r.codigo_disciplina)) DESC
+-- 1.6b Professor x demais turmas da disciplina (professor principal) [F2 + Professor]
+--      Compara o professor com as OUTRAS turmas da disciplina (sem incluir a dele na media),
+--      com aprovacao ponderada por matriculados.
+WITH prof_disc AS (
+    SELECT codigo_disciplina, disciplina, sk_p1,
+           COUNT(*)              AS turmas,
+           SUM(qtd_aprn)         AS aprovados,
+           SUM(qtd_matriculados) AS matriculados
+    FROM dm_prof.vw_rend_turma
+    GROUP BY codigo_disciplina, disciplina, sk_p1
+), comparado AS (
+    SELECT pd.*,
+           SUM(aprovados)    OVER (PARTITION BY codigo_disciplina) - aprovados    AS aprovados_outros,
+           SUM(matriculados) OVER (PARTITION BY codigo_disciplina) - matriculados AS matriculados_outros
+    FROM prof_disc pd
+)
+SELECT c.codigo_disciplina, c.disciplina, p.nome AS professor, c.turmas,
+       ROUND(100.0 * c.aprovados / c.matriculados, 2)               AS aprovacao_prof,
+       ROUND(100.0 * c.aprovados_outros / c.matriculados_outros, 2) AS aprovacao_demais_turmas,
+       ROUND(100.0 * c.aprovados / c.matriculados
+             - 100.0 * c.aprovados_outros / c.matriculados_outros, 2) AS diferenca_vs_disciplina
+FROM comparado c
+JOIN dm_prof.dim_professor p ON p.professor_id = c.sk_p1
+WHERE c.matriculados_outros > 0
+ORDER BY ABS(100.0 * c.aprovados / c.matriculados
+             - 100.0 * c.aprovados_outros / c.matriculados_outros) DESC
 LIMIT 50;
 
 -- 1.7 Reprovacao por periodo do curriculo (1o ao 10o) [F2 + Disciplina]
@@ -214,14 +222,12 @@ SELECT ano_semestre, semestre,
 FROM dm_prof.vw_rend_turma
 GROUP BY ano_semestre, semestre
 ORDER BY ano_semestre;
-
-SELECT semestre AS semestre_do_ano,
-       ROUND(100.0 * SUM(total_reprovados) / SUM(qtd_matriculados), 2) AS pct_reprov_total
-FROM dm_prof.vw_rend_turma
-GROUP BY semestre
-ORDER BY semestre;
+--     A antiga 1.9b (1o x 2o semestre do ano) saiu: dava 17,11% x 17,39%, e a coluna
+--     semestre acima ja permite essa leitura.
 
 -- 1.10 Perfil de reprovacao por perfil do aluno [F1 + Aluno]
+--      Unidade: matricula em disciplina (nao aluno). tipo_cota so para cotistas:
+--      "Ampla Concorrencia" repetia a linha cotista = Nao.
 SELECT p.dimensao, p.valor,
        COUNT(*) AS matriculas,
        ROUND(100.0 * COUNT(*) FILTER (WHERE f.situacao <> 'Aprovado') / COUNT(*), 2) AS pct_reprovacao,
@@ -234,42 +240,40 @@ CROSS JOIN LATERAL (VALUES
     ('raca_etnia',      f.raca_etnia),
     ('faixa_economica', f.faixa_economica),
     ('cotista',         CASE WHEN f.cotista THEN 'Sim' ELSE 'Não' END),
-    ('tipo_cota',       f.tipo_cota),
+    ('tipo_cota',       CASE WHEN f.cotista THEN f.tipo_cota END),
     ('escola_origem',   f.tipo_escola_em),
     ('bolsista',        CASE WHEN f.e_bolsista THEN 'Sim' ELSE 'Não' END)
 ) AS p(dimensao, valor)
+WHERE p.valor IS NOT NULL
 GROUP BY p.dimensao, p.valor
 ORDER BY p.dimensao, pct_reprovacao DESC;
 
--- 1.11a Correlacao entre faltas e nota por disciplina [F1]
-SELECT curso, codigo_disciplina, disciplina,
-       COUNT(*) AS matriculas,
-       ROUND(CORR(qtd_faltas, media_nota)::numeric, 3) AS correlacao_faltas_nota
-FROM dm_aluno_prof.vw_aluno_disciplina
-GROUP BY curso, codigo_disciplina, disciplina
-HAVING COUNT(*) >= 30
-ORDER BY correlacao_faltas_nota;
-
--- 1.11b Ponto de corte: aprovacao por faixa de % de faltas sobre a carga horaria [F1]
---       (a queda abrupta aparece ao passar de 25%)
+-- 1.11 Faltas x desempenho: aprovacao por faixa de % de faltas sobre a carga horaria [F1]
+--      Uma consulta so (antes 1.11a/1.11b). A queda em 25% e a regra de frequencia minima (75%):
+--      todo reprovado por falta tem > 25% de faltas. O efeito da falta sobre a nota aparece
+--      em pct_reprov_nota nas faixas abaixo de 25%.
 SELECT (FLOOR(100.0 * qtd_faltas / carga_horaria / 5) * 5)::int AS faixa_pct_faltas_inicio,
        COUNT(*) AS matriculas,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE situacao = 'Aprovado') / COUNT(*), 2) AS pct_aprovacao
+       ROUND(100.0 * COUNT(*) FILTER (WHERE situacao = 'Aprovado') / COUNT(*), 2)            AS pct_aprovacao,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE situacao = 'Reprovado por Nota') / COUNT(*), 2)  AS pct_reprov_nota,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE situacao = 'Reprovado por Falta') / COUNT(*), 2) AS pct_reprov_falta
 FROM dm_aluno_prof.vw_aluno_disciplina
 GROUP BY 1
 ORDER BY 1;
 
 -- 1.12 Reprovacao reincidente: reprovados 2+ vezes na mesma disciplina [F1 + nr_tentativa]
+--      ja_aprovado separa quem ja passou depois de quem continua retido (esses vem primeiro).
 SELECT a.numero_matricula, a.nome AS aluno, v.curso, v.codigo_disciplina, v.disciplina,
        COUNT(*) FILTER (WHERE v.situacao <> 'Aprovado') AS reprovacoes,
-       MAX(v.nr_tentativa) AS tentativas
+       MAX(v.nr_tentativa) AS tentativas,
+       BOOL_OR(v.situacao = 'Aprovado') AS ja_aprovado
 FROM dm_aluno_prof.vw_aluno_disciplina v
 JOIN dm_aluno_prof.dim_aluno a ON a.aluno_id = v.aluno_id
 GROUP BY a.aluno_id, a.numero_matricula, a.nome, v.curso, v.codigo_disciplina, v.disciplina
 HAVING COUNT(*) FILTER (WHERE v.situacao <> 'Aprovado') >= 2
-ORDER BY reprovacoes DESC, v.curso;
+ORDER BY ja_aprovado, reprovacoes DESC, v.curso;
 
--- 1.12b Disciplinas com mais reincidentes
+-- 1.12b Disciplinas com mais reincidentes (top 20, mantendo empates na ultima posicao)
 SELECT curso, codigo_disciplina, disciplina, COUNT(*) AS alunos_reincidentes
 FROM (
     SELECT v.aluno_id, v.curso, v.codigo_disciplina, v.disciplina
@@ -278,10 +282,12 @@ FROM (
     HAVING COUNT(*) FILTER (WHERE v.situacao <> 'Aprovado') >= 2
 ) r
 GROUP BY curso, codigo_disciplina, disciplina
-ORDER BY alunos_reincidentes DESC;
+ORDER BY alunos_reincidentes DESC
+FETCH FIRST 20 ROWS WITH TIES;
 
 -- 1.13 Efeito domino: quem reprovou no pre-requisito X, como vai na disciplina Y [F1 + pre-requisitos]
---      Compara, na 1a tentativa de Y, reprovacao e evasao de quem reprovou x quem passou em X
+--      Compara, na 1a tentativa de Y, reprovacao e evasao de quem reprovou x quem passou em X.
+--      Uma linha por par X -> Y com os dois grupos lado a lado. So entram pares com >= 10 alunos em cada grupo.
 WITH x_res AS (
     SELECT aluno_id, disciplina_id AS x_id,
            BOOL_OR(situacao <> 'Aprovado') AS reprovou_x,
@@ -289,24 +295,39 @@ WITH x_res AS (
     FROM dm_aluno_prof.fato_aluno_em_disciplina
     WHERE nr_tentativa = 1
     GROUP BY aluno_id, disciplina_id
+), par AS (
+    SELECT pr.prerequisito_id, pr.disciplina_id,
+           COUNT(*) FILTER (WHERE xr.reprovou_x)     AS alunos_reprovaram_x,
+           COUNT(*) FILTER (WHERE NOT xr.reprovou_x) AS alunos_passaram_x,
+           100.0 * COUNT(*) FILTER (WHERE xr.reprovou_x AND fy.situacao <> 'Aprovado')
+                 / NULLIF(COUNT(*) FILTER (WHERE xr.reprovou_x), 0)         AS reprov_y_reprovaram_x,
+           100.0 * COUNT(*) FILTER (WHERE NOT xr.reprovou_x AND fy.situacao <> 'Aprovado')
+                 / NULLIF(COUNT(*) FILTER (WHERE NOT xr.reprovou_x), 0)     AS reprov_y_passaram_x,
+           100.0 * COUNT(*) FILTER (WHERE xr.reprovou_x AND a.tipo_evasao <> 'Ativo')
+                 / NULLIF(COUNT(*) FILTER (WHERE xr.reprovou_x), 0)         AS evasao_reprovaram_x,
+           100.0 * COUNT(*) FILTER (WHERE NOT xr.reprovou_x AND a.tipo_evasao <> 'Ativo')
+                 / NULLIF(COUNT(*) FILTER (WHERE NOT xr.reprovou_x), 0)     AS evasao_passaram_x
+    FROM dm_aluno_prof.disciplina_prerequisito pr
+    JOIN x_res xr ON xr.x_id = pr.prerequisito_id
+    JOIN dm_aluno_prof.fato_aluno_em_disciplina fy
+      ON fy.aluno_id = xr.aluno_id AND fy.disciplina_id = pr.disciplina_id
+     AND fy.nr_tentativa = 1 AND fy.tempo_id > xr.tempo_x
+    JOIN dm_aluno_prof.dim_aluno a ON a.aluno_id = xr.aluno_id
+    GROUP BY pr.prerequisito_id, pr.disciplina_id
 )
 SELECT dx.codigo_disciplina AS prerequisito, dx.nome AS nome_prerequisito,
        dy.codigo_disciplina AS disciplina_seguinte, dy.nome AS nome_seguinte,
-       xr.reprovou_x,
-       COUNT(*) AS alunos,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE fy.situacao <> 'Aprovado') / COUNT(*), 2) AS pct_reprov_em_y,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE a.tipo_evasao <> 'Ativo') / COUNT(*), 2)   AS pct_evasao
-FROM dm_aluno_prof.disciplina_prerequisito pr
-JOIN dm_aluno_prof.dim_disciplina dx ON dx.disciplina_id = pr.prerequisito_id
-JOIN dm_aluno_prof.dim_disciplina dy ON dy.disciplina_id = pr.disciplina_id
-JOIN x_res xr ON xr.x_id = pr.prerequisito_id
-JOIN dm_aluno_prof.fato_aluno_em_disciplina fy
-  ON fy.aluno_id = xr.aluno_id AND fy.disciplina_id = pr.disciplina_id
- AND fy.nr_tentativa = 1 AND fy.tempo_id > xr.tempo_x
-JOIN dm_aluno_prof.dim_aluno a ON a.aluno_id = xr.aluno_id
-GROUP BY dx.codigo_disciplina, dx.nome, dy.codigo_disciplina, dy.nome, xr.reprovou_x
-HAVING COUNT(*) >= 20
-ORDER BY dx.codigo_disciplina, dy.codigo_disciplina, xr.reprovou_x DESC;
+       p.alunos_reprovaram_x, p.alunos_passaram_x,
+       ROUND(p.reprov_y_reprovaram_x, 2)                         AS pct_reprov_y_reprovaram_x,
+       ROUND(p.reprov_y_passaram_x, 2)                           AS pct_reprov_y_passaram_x,
+       ROUND(p.reprov_y_reprovaram_x - p.reprov_y_passaram_x, 2) AS efeito_reprov_pp,
+       ROUND(p.evasao_reprovaram_x, 2)                           AS pct_evasao_reprovaram_x,
+       ROUND(p.evasao_passaram_x, 2)                             AS pct_evasao_passaram_x
+FROM par p
+JOIN dm_aluno_prof.dim_disciplina dx ON dx.disciplina_id = p.prerequisito_id
+JOIN dm_aluno_prof.dim_disciplina dy ON dy.disciplina_id = p.disciplina_id
+WHERE p.alunos_reprovaram_x >= 10 AND p.alunos_passaram_x >= 10
+ORDER BY efeito_reprov_pp DESC;
 
 
 -- ############################################################################
@@ -314,6 +335,7 @@ ORDER BY dx.codigo_disciplina, dy.codigo_disciplina, xr.reprovou_x DESC;
 -- ############################################################################
 
 -- 2.1 Taxa de evasao por curso e coorte [Aluno]
+--     Taxa acumulada: coortes antigas tiveram mais semestres para evadir. Para ritmo, use a 2.3.
 SELECT c.nome AS curso, a.ano_semestre_ingresso AS coorte,
        COUNT(*) AS ingressantes,
        COUNT(*) FILTER (WHERE a.tipo_evasao <> 'Ativo') AS evadidos,
