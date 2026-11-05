@@ -352,103 +352,116 @@ ORDER BY al.coorte, k.k;
 
 -- 2.4 Semestre critico de evasao (semestre do curso em que evade) [Aluno]
 SELECT c.nome AS curso,
-       (a.ano_evasao * 2 + a.semestre_evasao) - (a.ano_ingresso * 2 + a.semestre_ingresso) + 1 AS semestre_do_curso,
-       COUNT(*) AS evadidos
+    (a.ano_evasao * 2 + a.semestre_evasao)- (a.ano_ingresso * 2 + a.semestre_ingresso) + 1 AS semestre_do_curso,
+    COUNT(*) AS evadidos
 FROM dm_aluno_prof.dim_aluno a
 JOIN dm_aluno_prof.dim_curso c ON c.curso_id = a.curso_id
-WHERE a.tipo_evasao <> 'Ativo'
-GROUP BY c.nome, 2
+WHERE a.ano_evasao IS NOT NULL AND a.semestre_evasao IS NOT NULL
+GROUP BY c.nome, semestre_do_curso
 ORDER BY c.nome, evadidos DESC;
 
-SELECT (a.ano_evasao * 2 + a.semestre_evasao) - (a.ano_ingresso * 2 + a.semestre_ingresso) + 1 AS semestre_do_curso,
-       COUNT(*) AS evadidos
-FROM dm_aluno_prof.dim_aluno a
-WHERE a.tipo_evasao <> 'Ativo'
-GROUP BY 1 ORDER BY evadidos DESC;
-
--- 2.5 Evasao por forma/meio de ingresso, cota e escola do ensino medio [Aluno]
-SELECT p.dimensao, p.valor, COUNT(*) AS alunos,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE a.tipo_evasao <> 'Ativo') / COUNT(*), 2) AS taxa_evasao
-FROM dm_aluno_prof.dim_aluno a
-CROSS JOIN LATERAL (VALUES
-    ('forma_ingresso', a.forma_ingresso),
-    ('meio_ingresso',  a.meio_ingresso),
-    ('tipo_cota',      a.tipo_cota),
-    ('tipo_escola_em', a.tipo_escola_em)
-) AS p(dimensao, valor)
-GROUP BY p.dimensao, p.valor
-ORDER BY p.dimensao, taxa_evasao DESC;
-
 -- 2.6 Evasao por faixa economica, assistencia e bolsista: a assistencia reduz a evasao? [Aluno + F1]
-SELECT a.faixa_economica, a.assistencia_estudantil,
-       (b.aluno_id IS NOT NULL) AS foi_bolsista,
-       COUNT(*) AS alunos,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE a.tipo_evasao <> 'Ativo') / COUNT(*), 2) AS taxa_evasao
+SELECT 
+    COALESCE(a.faixa_economica, 'Não informado') AS faixa_economica,
+    COALESCE(a.assistencia_estudantil, 'Não informado') AS assistencia_estudantil,
+    EXISTS (
+        SELECT 1
+        FROM dm_aluno_prof.fato_aluno_em_disciplina f
+        WHERE f.aluno_id = a.aluno_id
+          AND f.e_bolsista = TRUE
+    ) AS foi_bolsista,
+    COUNT(*) AS alunos,
+    COUNT(*) FILTER (WHERE a.ano_evasao IS NOT NULL) AS evadidos,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE a.ano_evasao IS NOT NULL) / NULLIF(COUNT(*), 0),2) AS taxa_evasao
 FROM dm_aluno_prof.dim_aluno a
-LEFT JOIN (SELECT DISTINCT aluno_id FROM dm_aluno_prof.fato_aluno_em_disciplina WHERE e_bolsista) b
-       ON b.aluno_id = a.aluno_id
-GROUP BY a.faixa_economica, a.assistencia_estudantil, (b.aluno_id IS NOT NULL)
-ORDER BY a.faixa_economica, a.assistencia_estudantil;
+GROUP BY a.faixa_economica, a.assistencia_estudantil, foi_bolsista
+ORDER BY faixa_economica, assistencia_estudantil;
 
 -- 2.7 Evasao por bairro de residencia (+ distancia media ao campus) [Aluno]
-SELECT c.campi, a.bairro_residencia,
-       COUNT(*) AS alunos,
-       ROUND(AVG(a.distancia_campus_km), 1)    AS dist_media_km,
-       ROUND(AVG(a.tempo_deslocamento_min), 0) AS deslocamento_medio_min,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE a.tipo_evasao <> 'Ativo') / COUNT(*), 2) AS taxa_evasao
+SELECT c.campi,
+    COALESCE(a.bairro_residencia, 'Não informado') AS bairro,
+    COUNT(*) AS alunos,
+    ROUND(AVG(a.distancia_campus_km), 1) AS dist_media_km,
+    ROUND(AVG(a.tempo_deslocamento_min), 0) AS deslocamento_medio_min,
+    COUNT(*) FILTER ( WHERE a.ano_evasao IS NOT NULL) AS evadidos,
+    ROUND( 100.0 * COUNT(*) FILTER ( WHERE a.ano_evasao IS NOT NULL) / NULLIF(COUNT(*), 0),2) AS taxa_evasao
 FROM dm_aluno_prof.dim_aluno a
 JOIN dm_aluno_prof.dim_curso c ON c.curso_id = a.curso_id
 GROUP BY c.campi, a.bairro_residencia
+HAVING COUNT(*) >= 5
 ORDER BY taxa_evasao DESC;
-
--- 2.8 Evasao por tempo entre conclusao do EM e ingresso [Aluno]
-SELECT CASE WHEN a.ano_ingresso - a.ano_conclusao_em <= 1 THEN '0-1 ano'
-            WHEN a.ano_ingresso - a.ano_conclusao_em <= 3 THEN '2-3 anos'
-            WHEN a.ano_ingresso - a.ano_conclusao_em <= 6 THEN '4-6 anos'
-            ELSE '7+ anos' END AS intervalo_em_ingresso,
-       COUNT(*) AS alunos,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE a.tipo_evasao <> 'Ativo') / COUNT(*), 2) AS taxa_evasao
-FROM dm_aluno_prof.dim_aluno a
-GROUP BY 1
-ORDER BY 1;
 
 -- 2.9 Indicadores precoces de evasao: ativos com 2+ semestres de baixo rendimento,
 --     muitas faltas ou CH integralizada abaixo do esperado [F1 + Aluno]
 --     Esperado = CH das disciplinas obrigatorias dos periodos ja transcorridos
-WITH ref AS (SELECT sem_abs_ref FROM dm_aluno_prof.vw_semestre_ref),
+WITH ref AS (
+    SELECT sem_abs_ref
+    FROM dm_aluno_prof.vw_semestre_ref
+),
 sem_aluno AS (
-    SELECT aluno_id, sem_abs,
-           100.0 * COUNT(*) FILTER (WHERE situacao = 'Aprovado') / COUNT(*) AS pct_aprov_sem,
-           AVG(qtd_faltas::numeric / carga_horaria) AS faltas_rel
+    SELECT
+        aluno_id,
+        sem_abs,
+        100.0 * COUNT(*) FILTER (
+            WHERE situacao = 'Aprovado'
+        ) / NULLIF(COUNT(*), 0) AS pct_aprov_sem,
+        AVG(
+            qtd_faltas::numeric /
+            NULLIF(carga_horaria, 0)
+        ) AS faltas_rel
     FROM dm_aluno_prof.vw_aluno_disciplina
     GROUP BY aluno_id, sem_abs
 ),
 risco AS (
-    SELECT aluno_id,
-           COUNT(*) FILTER (WHERE pct_aprov_sem < 50) AS semestres_baixo_rend,
-           ROUND(AVG(faltas_rel) * 100, 1)            AS media_pct_faltas
-    FROM sem_aluno GROUP BY aluno_id
+    SELECT
+        aluno_id,
+        COUNT(*) FILTER (
+            WHERE pct_aprov_sem < 50
+        ) AS semestres_baixo_rend,
+        ROUND(AVG(faltas_rel) * 100, 1) AS media_pct_faltas
+    FROM sem_aluno
+    GROUP BY aluno_id
 )
-SELECT a.numero_matricula, a.nome, c.nome AS curso, a.ano_semestre_ingresso AS coorte,
-       r.semestres_baixo_rend, r.media_pct_faltas,
-       a.ch_integralizada,
-       esp.ch_esperada,
-       ROUND(100.0 * a.ch_integralizada / NULLIF(esp.ch_esperada, 0), 1) AS pct_do_esperado
+SELECT
+    a.numero_matricula,
+    a.nome,
+    c.nome AS curso,
+    a.ano_semestre_ingresso AS coorte,
+    COALESCE(r.semestres_baixo_rend, 0) AS semestres_baixo_rend,
+    r.media_pct_faltas,
+    a.ch_integralizada,
+    esp.ch_esperada,
+    ROUND(
+        100.0 * a.ch_integralizada /
+        NULLIF(esp.ch_esperada, 0),
+        1
+    ) AS pct_do_esperado
 FROM dm_aluno_prof.dim_aluno a
-JOIN dm_aluno_prof.dim_curso c ON c.curso_id = a.curso_id
-JOIN risco r ON r.aluno_id = a.aluno_id
+JOIN dm_aluno_prof.dim_curso c
+    ON c.curso_id = a.curso_id
+LEFT JOIN risco r
+    ON r.aluno_id = a.aluno_id
 CROSS JOIN ref
 CROSS JOIN LATERAL (
-    SELECT COALESCE(SUM(d.carga_horaria), 0) AS ch_esperada
+    SELECT
+        COALESCE(SUM(d.carga_horaria), 0) AS ch_esperada
     FROM dm_aluno_prof.dim_disciplina d
-    WHERE d.fk_curso = a.curso_id AND d.tipo = 'Obrigatória'
-      AND d.periodo <= ref.sem_abs_ref - (a.ano_ingresso * 2 + a.semestre_ingresso) + 1
+    WHERE d.fk_curso = a.curso_id
+      AND d.tipo = 'Obrigatória'
+      AND d.periodo <= (
+          ref.sem_abs_ref -
+          (a.ano_ingresso * 2 + a.semestre_ingresso) + 1
+      )
 ) esp
 WHERE a.tipo_evasao = 'Ativo'
-  AND (r.semestres_baixo_rend >= 2
-       OR r.media_pct_faltas >= 15
-       OR a.ch_integralizada < 0.7 * esp.ch_esperada)
-ORDER BY r.semestres_baixo_rend DESC, pct_do_esperado;
+  AND (
+      COALESCE(r.semestres_baixo_rend, 0) >= 2
+      OR r.media_pct_faltas >= 15
+      OR a.ch_integralizada < 0.7 * esp.ch_esperada
+  )
+ORDER BY
+    semestres_baixo_rend DESC,
+    pct_do_esperado;
 
 -- 2.10 Evasao por disciplina: disciplinas cursadas no ULTIMO semestre antes de evadir,
 --      com reprovacao por falta (infrequencia) [F1]
@@ -476,33 +489,6 @@ WHERE m.situacao = 'Cancelado'
 GROUP BY c.nome
 ORDER BY cancelamentos DESC;
 
--- 2.12 Retencao x evasao: ativos fora do ciclo minimo e ainda dentro do maximo (risco de jubilamento) [Aluno]
---      AVISO: retorna vazio neste volume (so ha 7 semestres de historico; o menor ciclo minimo e 8)
-WITH ref AS (SELECT sem_abs_ref FROM dm_aluno_prof.vw_semestre_ref)
-SELECT a.numero_matricula, a.nome, c.nome AS curso, a.ano_semestre_ingresso AS coorte,
-       ref.sem_abs_ref - (a.ano_ingresso * 2 + a.semestre_ingresso) + 1 AS semestres_cursados,
-       a.qtd_min_conc, a.qtd_max_conc,
-       a.qtd_max_conc - (ref.sem_abs_ref - (a.ano_ingresso * 2 + a.semestre_ingresso) + 1) AS semestres_ate_jubilamento
-FROM dm_aluno_prof.dim_aluno a
-JOIN dm_aluno_prof.dim_curso c ON c.curso_id = a.curso_id
-CROSS JOIN ref
-WHERE a.tipo_evasao = 'Ativo'
-  AND ref.sem_abs_ref - (a.ano_ingresso * 2 + a.semestre_ingresso) + 1 > a.qtd_min_conc
-  AND ref.sem_abs_ref - (a.ano_ingresso * 2 + a.semestre_ingresso) + 1 <= a.qtd_max_conc
-ORDER BY semestres_ate_jubilamento;
-
--- 2.13 Alunos "blocados" (flg_blocado): perfil e tempo ate evadir [Aluno]
---      O PDF cita flg_bloqueado; o DDL tem flg_blocado (aqui usado como esta).
---      Se a ideia for "bloqueio de matricula" com duracao, falta um historico de bloqueios.
-SELECT a.flg_blocado, c.nome AS curso, a.genero, a.faixa_economica,
-       COUNT(*) AS alunos,
-       COUNT(*) FILTER (WHERE a.tipo_evasao <> 'Ativo') AS evadidos,
-       ROUND(AVG((a.ano_evasao * 2 + a.semestre_evasao) - (a.ano_ingresso * 2 + a.semestre_ingresso) + 1)
-             FILTER (WHERE a.tipo_evasao <> 'Ativo'), 2) AS semestres_medios_ate_evadir
-FROM dm_aluno_prof.dim_aluno a
-JOIN dm_aluno_prof.dim_curso c ON c.curso_id = a.curso_id
-GROUP BY a.flg_blocado, c.nome, a.genero, a.faixa_economica
-ORDER BY a.flg_blocado DESC, alunos DESC;
 
 
 -- ############################################################################
@@ -512,15 +498,25 @@ ORDER BY a.flg_blocado DESC, alunos DESC;
 -- 3.1 % de ch_integralizada sobre a CH do curso, por coorte [Aluno + Curso]
 --     (as disciplinas modeladas somam ~1.100h por curso, entao o % absoluto e baixo;
 --      use a comparacao entre coortes/cursos)
-SELECT c.nome AS curso, a.ano_semestre_ingresso AS coorte,
-       COUNT(*) AS alunos,
-       ROUND(AVG(a.ch_integralizada), 0) AS ch_media_integralizada,
-       c.carga_horaria AS ch_curso,
-       ROUND(100.0 * AVG(a.ch_integralizada) / c.carga_horaria, 2) AS pct_integralizado
+SELECT
+    c.nome AS curso,
+    a.ano_semestre_ingresso AS coorte,
+    COUNT(*) AS alunos,
+    ROUND(AVG(a.ch_integralizada), 0) AS ch_media_integralizada,
+    c.carga_horaria AS ch_curso,
+    ROUND(
+        100.0 * AVG(a.ch_integralizada) /
+        NULLIF(c.carga_horaria, 0),
+        2
+    ) AS pct_integralizado
 FROM dm_aluno_prof.dim_aluno a
-JOIN dm_aluno_prof.dim_curso c ON c.curso_id = a.curso_id
+JOIN dm_aluno_prof.dim_curso c
+    ON c.curso_id = a.curso_id
 WHERE a.tipo_evasao = 'Ativo'
-GROUP BY c.nome, c.carga_horaria, a.ano_semestre_ingresso
+GROUP BY
+    c.nome,
+    c.carga_horaria,
+    a.ano_semestre_ingresso
 ORDER BY c.nome, a.ano_semestre_ingresso;
 
 -- 3.2 Alunos dentro do prazo minimo, fora do minimo e em risco do maximo, por curso [Aluno]
@@ -551,25 +547,6 @@ JOIN dm_aluno_prof.dim_curso c ON c.curso_id = m.curso_id
 WHERE m.situacao = 'Formado'
 GROUP BY c.nome, c.tempo_min_conclusao, c.tempo_max_conclusao
 ORDER BY c.nome;
-
--- 3.4 Taxa de sucesso por coorte: formados no prazo, com atraso, evadidos, ainda ativos [Aluno + situacao]
-WITH ult AS (
-    SELECT DISTINCT ON (m.aluno_id) m.aluno_id, m.situacao, m.semestre_curso
-    FROM dm_aluno_prof.fato_matricula_periodo m
-    ORDER BY m.aluno_id, m.tempo_id DESC
-)
-SELECT a.ano_semestre_ingresso AS coorte,
-       COUNT(*) AS ingressantes,
-       COUNT(*) FILTER (WHERE u.situacao = 'Formado' AND u.semestre_curso <= c.tempo_min_conclusao) AS formados_no_prazo,
-       COUNT(*) FILTER (WHERE u.situacao = 'Formado' AND u.semestre_curso >  c.tempo_min_conclusao) AS formados_com_atraso,
-       COUNT(*) FILTER (WHERE u.situacao = 'Cancelado') AS evadidos,
-       COUNT(*) FILTER (WHERE u.situacao IN ('Ativo', 'Trancado')) AS ainda_ativos,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE u.situacao = 'Formado') / COUNT(*), 2) AS taxa_sucesso
-FROM dm_aluno_prof.dim_aluno a
-JOIN ult u ON u.aluno_id = a.aluno_id
-JOIN dm_aluno_prof.dim_curso c ON c.curso_id = a.curso_id
-GROUP BY a.ano_semestre_ingresso
-ORDER BY a.ano_semestre_ingresso;
 
 -- 3.5 Media de creditos adquiridos por semestre por aluno e curso [F1]
 --     (tambem mostra creditos cursados, para detectar quem "dilui" a carga)
